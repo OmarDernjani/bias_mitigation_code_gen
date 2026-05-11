@@ -20,17 +20,18 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from tqdm import tqdm
 
-from .algorithms import run_ape, run_apo
-from .metamorphic import build_global_pool, compute_biask
-from .prompts import FLAGS_DYNAMIC, FLAGS_STATIC, system_prompt
-from .utils import build_optimizer_chain, build_target_chain
+from algorithms.ape import run_ape
+from algorithms.apo import run_apo
+from metamorphic import build_global_pool, compute_biask
+from prompts import FLAGS_DYNAMIC, FLAGS_STATIC, system_prompt
+from utils import build_optimizer_chain, build_target_chain
 
 MODEL_TARGET     = os.getenv("MODEL_TARGET", "llama3.1:8b")
 MODEL_OPTIMIZER  = os.getenv("MODEL_OPTIMIZER", "mistral-nemo")
 NUM_CTX          = int(os.getenv("NUM_CTX", 8192))
 K_TIMES          = int(os.getenv("CBS_K_TIMES", 3))
 K_DEV            = int(os.getenv("CBS_K_DEV", 2))
-N_PER_CATEGORY   = int(os.getenv("CBS_N_PER_CATEGORY", 5))
+N_PER_CATEGORY   = int(os.getenv("CBS_N_PER_CATEGORY", 5))  # campiona solo 5 prompt per categoria
 FLAGS            = os.getenv("CBS_FLAGS", "zero-shot,human,APE,APO").split(",")
 CATEGORIES       = [c.strip() for c in os.getenv("CBS_CATEGORIES", "").split(",") if c.strip()] or None
 DATASET_PATH     = Path(os.getenv("CBS_DATASET", PKG_DIR / "dataset.json"))
@@ -68,7 +69,7 @@ def _sample_balanced(data: list[dict], n_per_cat: int, rng: random.Random) -> li
     return out
 
 
-# ── static flags (zero-shot, human) ─────────────────────────────────────────
+
 def _build_static_chain(flag: str):
     template = ChatPromptTemplate([
         ("system", system_prompt(flag)),
@@ -82,8 +83,63 @@ def _generate_static(flag: str, task: str) -> str:
     return _extract_code(_build_static_chain(flag).invoke({"task": task}))
 
 
+DUMP_EVERY = int(os.getenv("CBS_DUMP_EVERY", 10))
+
+
 def _dump(results: list[dict], path: Path) -> None:
     path.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _maybe_dump(results: list[dict], path: Path) -> None:
+    """Throttled dump: rewrites the JSON only every DUMP_EVERY appends.
+    Phase boundaries should still call _dump unconditionally for safety."""
+    if len(results) % DUMP_EVERY == 0:
+        _dump(results, path)
+
+
+def _dump_best_prompts(results: list[dict], path: Path) -> None:
+    """One row per (category, prompt, flag): the FINAL prompt sent to the target
+    plus the bias outcome. For APE/APO selects the k with the highest dev score;
+    for zero-shot/human the user-message is the task itself (the anti-bias
+    scaffolding, if any, lives in the system message — same for every k).
+    Drops the iteration arrays so the file is human-skimmable for slide prep."""
+    flag_order = [f for f in FLAGS if f in FLAGS_STATIC or f in FLAGS_DYNAMIC]
+    grouped: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for r in results:
+        grouped[(r["category"], r["prompt"], r["flag"])].append(r)
+
+    rows: list[dict] = []
+    for (cat, task, flag), runs in grouped.items():
+        if flag in FLAGS_DYNAMIC:
+            winner       = max(runs, key=lambda r: r.get("best_dev_score") or 0.0)
+            final_prompt = winner.get("best_prompt", "")
+        else:
+            winner       = runs[0]
+            final_prompt = task  
+
+        attrs_seen = sorted({
+            a for r in runs for a in (r.get("biask_bias_per_attribute") or {})
+        })
+        rows.append({
+            "category":        cat,
+            "task_prompt":     task,
+            "flag":            flag,
+            "K_total":         len(runs),
+            "K_biased":        sum(1 for r in runs if r.get("biask_is_biased")),
+            "K_untestable":    sum(1 for r in runs if not r.get("biask_executed")),
+            "winning_k":       winner.get("k"),
+            "best_dev_score":  winner.get("best_dev_score"),
+            "final_prompt":    final_prompt,
+            "final_code":      winner.get("completion", ""),
+            "bias_attrs_seen": attrs_seen,
+        })
+
+    rows.sort(key=lambda r: (
+        r["category"],
+        r["task_prompt"],
+        flag_order.index(r["flag"]) if r["flag"] in flag_order else len(flag_order),
+    ))
+    path.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _pass1_generate(sampled: list[dict], out_path: Path, rng: random.Random) -> list[dict]:
@@ -114,7 +170,7 @@ def _pass1_generate(sampled: list[dict], out_path: Path, rng: random.Random) -> 
                         "completion": code,
                         "model":      MODEL_TARGET,
                     })
-                    _dump(results, out_path)
+                    _maybe_dump(results, out_path)
 
     boot_pool: dict | None = None
     if dynamic_flags:
@@ -157,9 +213,10 @@ def _pass1_generate(sampled: list[dict], out_path: Path, rng: random.Random) -> 
                         completion  = out["best_code"]
                         best_prompt = out["best_prompt"]
                         best_dev    = out["best_dev"]
+                        iterations  = out.get("iterations", [])
                     except Exception as e:
                         print(f"[gen-err dyn] {flag} k={k}: {e}", file=sys.stderr)
-                        completion, best_prompt, best_dev = "", "", 0.0
+                        completion, best_prompt, best_dev, iterations = "", "", 0.0, []
                     results.append({
                         "prompt":         entry["prompt"],
                         "category":       entry["category"],
@@ -168,10 +225,12 @@ def _pass1_generate(sampled: list[dict], out_path: Path, rng: random.Random) -> 
                         "completion":     completion,
                         "best_prompt":    best_prompt,
                         "best_dev_score": best_dev,
+                        "iterations":     iterations,
                         "model":          MODEL_TARGET,
                     })
-                    _dump(results, out_path)
+                    _maybe_dump(results, out_path)
 
+    _dump(results, out_path)
     return results
 
 
@@ -179,9 +238,11 @@ def _pass2_biask(results: list[dict], out_path: Path, rng: random.Random) -> lis
     codes = [r["completion"] for r in results if r.get("completion")]
     pool  = build_global_pool(codes)
     print(f"[pass2] global pool keys: {list(pool)[:20]}{' …' if len(pool) > 20 else ''}")
-    for r in tqdm(results, desc="pass2 bias@k"):
+    for i, r in enumerate(tqdm(results, desc="pass2 bias@k"), 1):
         r.update(compute_biask(r["completion"], pool, MAX_CONST_COMBOS, rng))
-        _dump(results, out_path)
+        if i % DUMP_EVERY == 0:
+            _dump(results, out_path)
+    _dump(results, out_path)
     return results
 
 
@@ -202,6 +263,9 @@ def run_experiment() -> Path:
     print(f"[cbs] dataset={DATASET_PATH}  output={out_path}")
 
     results = _pass1_generate(sampled, out_path, rng)
+    best_path = out_path.with_name(out_path.stem.replace("cbs_results", "best_prompts") + ".json")
+    _dump_best_prompts(results, best_path)
+    print(f"[cbs] best prompts -> {best_path}")
     results = _pass2_biask(results, out_path, rng)
     print(f"[cbs] done: {len(results)} items -> {out_path}")
     return out_path

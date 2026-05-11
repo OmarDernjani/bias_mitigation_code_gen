@@ -1,7 +1,11 @@
 import sys
 
-from .metrics import evaluate
-from .runner import run_experiment
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8")
+
+from metrics import evaluate
+from runner import run_experiment
 
 
 def _usage() -> None:

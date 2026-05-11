@@ -1,14 +1,11 @@
-# Load .env BEFORE submodules so module-level env reads (EXEC_TIMEOUT in
-# metamorphic.py, NUM_CTX in utils.py, APE_*/APO_* in algorithms/*) see the
-# user's values regardless of cwd.
 from pathlib import Path as _Path
 from dotenv import load_dotenv as _load_dotenv
 _load_dotenv(_Path(__file__).parent / ".env")
 
-from .metrics import evaluate
-from .prompts import SYSTEM_PROMPTS, system_prompt
-from .runner import run_experiment
-from .metamorphic import PROTECTED
+from metrics import evaluate
+from prompts import SYSTEM_PROMPTS, system_prompt
+from runner import run_experiment
+from metamorphic import PROTECTED
 
 __all__ = [
     "run_experiment",

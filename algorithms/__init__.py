@@ -1,2 +1,2 @@
-from .ape import run_ape
-from .apo import run_apo
+from algorithms.ape import run_ape
+from algorithms.apo import run_apo

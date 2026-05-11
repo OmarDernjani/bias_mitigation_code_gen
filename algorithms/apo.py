@@ -21,8 +21,8 @@ from langchain_community.chat_models import ChatOllama
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
-from ..metamorphic import evaluate_code_bias, get_biased_attributes
-from ..utils import NUM_CTX, extract_code
+from metamorphic import evaluate_and_describe
+from utils import NUM_CTX, extract_code
 
 NUM_GRADIENTS   = int(os.getenv("APO_NUM_GRADIENTS",   2))  # m: critiques per beam member
 NUM_EDITS       = int(os.getenv("APO_NUM_EDITS",       1))  # q: improved prompts per critique
@@ -132,18 +132,69 @@ def _format_biases(biased: list[dict]) -> str:
     return "\n".join(lines)
 
 
+_CODE_FENCE_RE = re.compile(r"```(?:[\w+-]*)?\s*\n?(.*?)```", re.DOTALL)
+_ORDINAL_RE    = re.compile(
+    r"\n?\s*(?:First|Second|Third|Fourth|Fifth|Sixth|Seventh|Eighth)\b[^\n:]*:\s*\n?",
+    re.IGNORECASE,
+)
+_NUMBERED_RE   = re.compile(
+    r"(?:^|\n)\s*\d+[\.\)]\s+(.*?)(?=(?:\n\s*\d+[\.\)]\s+)|\Z)",
+    re.DOTALL,
+)
+
+
+def _clean_item(s: str) -> str:
+    """Strip surrounding markdown fences/whitespace from a single extracted item."""
+    s = s.strip()
+    if s.startswith("```"):
+        m = _CODE_FENCE_RE.match(s)
+        if m:
+            s = m.group(1).strip()
+    return s.strip("`").strip()
+
+
 def _extract_tagged(text: str, tag: str, min_len: int = 10) -> list[str]:
-    """<tag>...</tag> with fallback to numbered list, then to whole-text."""
+    """Extract list items from optimizer LLM output, in order of preference:
+       1. <tag>...</tag> XML blocks (instructed format)
+       2. ```…``` markdown code fences (≥2 blocks)
+       3. Ordinal labels (First/Second/Third [Improved] Prompt:, …)
+       4. Numbered list (1./2./3.)
+       5. The whole text as a single item.
+    Models that don't respect XML tags (smaller / non instruction-tuned) tend to
+    fall back to markdown or ordinal labels — without these fallbacks the parser
+    silently glues N candidates into one mega-prompt."""
+    # 1. XML tag — instructed format
     pattern = rf"<{tag}>(.*?)</{tag}>"
     matches = [m.strip() for m in re.findall(pattern, text, re.DOTALL)
                if m.strip() and len(m.strip()) >= min_len]
     if matches:
         return matches
-    items = re.split(r'\n\s*\d+[\.\)]\s+', text)
-    items = [it.strip() for it in items if len(it.strip()) >= min_len]
-    if len(items) > 1:
+
+    # 2. Markdown code fences (≥2 blocks => list of candidates)
+    fences = [m.strip() for m in _CODE_FENCE_RE.findall(text)
+              if m.strip() and len(m.strip()) >= min_len]
+    if len(fences) >= 2:
+        return fences
+
+    # 3. Ordinal labels — "First Improved Prompt:\n…\nSecond Improved Prompt:\n…"
+    parts = _ORDINAL_RE.split(text)
+    parts = [_clean_item(p) for p in parts]
+    parts = [p for p in parts if len(p) >= min_len]
+    if len(parts) > 1:
+        return parts
+
+    # 4. Numbered list — capture only the bodies after each "N." marker
+    # (findall, not split — drops the preamble like "Here are critiques:")
+    items = [_clean_item(it) for it in _NUMBERED_RE.findall(text)]
+    items = [it for it in items if len(it) >= min_len]
+    if len(items) >= 2:
         return items
-    return [text.strip()] if len(text.strip()) >= min_len else []
+
+    # 5. Whole text (last resort — single candidate)
+    if fences:
+        return fences  # exactly one code-fence: prefer its content over the noise around it
+    cleaned = _clean_item(text)
+    return [cleaned] if len(cleaned) >= min_len else []
 
 
 # ── Main loop ────────────────────────────────────────────────────────────────
@@ -187,9 +238,12 @@ def run_apo(
         p0 = optimizer_chain.invoke({"problem": question})
     else:
         p0 = question
-    p0_code  = extract_code(target_chain.invoke({"user_prompt": p0}))
-    p0_score = evaluate_code_bias(p0_code, global_pool, rng_dev, k=k_dev)
-    beam: list[dict] = [{"prompt": p0, "code": p0_code, "dev_score": p0_score, "source": "init"}]
+    p0_code            = extract_code(target_chain.invoke({"user_prompt": p0}))
+    p0_score, p0_bias  = evaluate_and_describe(p0_code, global_pool, rng_dev, k=k_dev)
+    beam: list[dict] = [{
+        "prompt": p0, "code": p0_code, "dev_score": p0_score,
+        "bias_examples": p0_bias, "source": "init",
+    }]
     best_so_far = p0_score
     no_improve  = 0
     iterations: list[dict] = []
@@ -203,8 +257,8 @@ def run_apo(
             if member["dev_score"] >= 1.0:
                 continue  # already unbiased on the dev signal — no gradient
 
-            biased   = get_biased_attributes(member["code"], global_pool, rng_dev)
-            bias_str = _format_biases(biased)
+            # Reuse the bias examples computed during scoring (no extra subprocess).
+            bias_str = _format_biases(member.get("bias_examples", []))
 
             grad_resp = grad_chain.invoke({
                 "prompt": member["prompt"],
@@ -225,28 +279,30 @@ def run_apo(
                 })
                 improved = _extract_tagged(edit_resp, "prompt")[:num_edits]
                 for imp in improved:
-                    code  = extract_code(target_chain.invoke({"user_prompt": imp}))
-                    score = evaluate_code_bias(code, global_pool, rng_dev, k=k_dev)
+                    code             = extract_code(target_chain.invoke({"user_prompt": imp}))
+                    score, examples  = evaluate_and_describe(code, global_pool, rng_dev, k=k_dev)
                     gradient_candidates.append({
-                        "prompt":    imp,
-                        "code":      code,
-                        "dev_score": score,
-                        "source":    "gradient",
-                        "critique":  grad,
+                        "prompt":        imp,
+                        "code":          code,
+                        "dev_score":     score,
+                        "bias_examples": examples,
+                        "source":        "gradient",
+                        "critique":      grad,
                     })
 
         # Step 3 — Monte Carlo paraphrase expansion
         paraphrase_candidates: list[dict] = []
         for cand in gradient_candidates:
             for _ in range(num_paraphrases):
-                para  = para_chain.invoke({"prompt": cand["prompt"]})
-                code  = extract_code(target_chain.invoke({"user_prompt": para}))
-                score = evaluate_code_bias(code, global_pool, rng_dev, k=k_dev)
+                para             = para_chain.invoke({"prompt": cand["prompt"]})
+                code             = extract_code(target_chain.invoke({"user_prompt": para}))
+                score, examples  = evaluate_and_describe(code, global_pool, rng_dev, k=k_dev)
                 paraphrase_candidates.append({
-                    "prompt":    para,
-                    "code":      code,
-                    "dev_score": score,
-                    "source":    "paraphrase",
+                    "prompt":        para,
+                    "code":          code,
+                    "dev_score":     score,
+                    "bias_examples": examples,
+                    "source":        "paraphrase",
                 })
 
         full_pool = gradient_candidates + paraphrase_candidates

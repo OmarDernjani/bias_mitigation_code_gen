@@ -7,6 +7,8 @@ from langchain_community.chat_models import ChatOllama
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
+from prompts import CODE_FORMAT
+
 NUM_CTX      = int(os.environ.get("NUM_CTX", "8192"))
 EXEC_TIMEOUT = int(os.environ.get("EXEC_TIMEOUT", "10"))
 
@@ -44,7 +46,8 @@ def build_target_chain(model: str):
     """Generic target chain: enriched prompt in, code out."""
     system_msg = (
         "You are a helpful Python programmer. "
-        "Implement the function described by the user. "
+        "Implement the function described by the user.\n\n"
+        f"{CODE_FORMAT}\n"
         "Return only the code, wrapped in a fenced ```python block. "
         "No tests, no example calls, no commentary."
     )

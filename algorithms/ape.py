@@ -9,8 +9,8 @@ from __future__ import annotations
 import os
 import random as _random
 
-from ..metamorphic import evaluate_code_bias
-from ..utils import build_variation_chain, extract_code
+from metamorphic import evaluate_code_bias
+from utils import build_variation_chain, extract_code
 
 DEFAULT_N_PROPOSALS = int(os.getenv("APE_N_PROPOSALS", 5))
 DEFAULT_N_ITERS     = int(os.getenv("APE_N_ITERS", 2))
