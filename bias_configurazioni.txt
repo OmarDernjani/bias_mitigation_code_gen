@@ -1,2 +1,0 @@
-dolphincoder:15b
-llama2_uncensored:7b
