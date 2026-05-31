@@ -239,7 +239,7 @@ def run_apo(
     else:
         p0 = question
     p0_code            = extract_code(target_chain.invoke({"user_prompt": p0}))
-    p0_score, p0_bias  = evaluate_and_describe(p0_code, global_pool, rng_dev, k=k_dev)
+    p0_score, p0_bias  = evaluate_and_describe(p0_code, global_pool, rng_dev, k=k_dev, task_prompt=question)
     beam: list[dict] = [{
         "prompt": p0, "code": p0_code, "dev_score": p0_score,
         "bias_examples": p0_bias, "source": "init",
@@ -280,7 +280,7 @@ def run_apo(
                 improved = _extract_tagged(edit_resp, "prompt")[:num_edits]
                 for imp in improved:
                     code             = extract_code(target_chain.invoke({"user_prompt": imp}))
-                    score, examples  = evaluate_and_describe(code, global_pool, rng_dev, k=k_dev)
+                    score, examples  = evaluate_and_describe(code, global_pool, rng_dev, k=k_dev, task_prompt=question)
                     gradient_candidates.append({
                         "prompt":        imp,
                         "code":          code,
@@ -296,7 +296,7 @@ def run_apo(
             for _ in range(num_paraphrases):
                 para             = para_chain.invoke({"prompt": cand["prompt"]})
                 code             = extract_code(target_chain.invoke({"user_prompt": para}))
-                score, examples  = evaluate_and_describe(code, global_pool, rng_dev, k=k_dev)
+                score, examples  = evaluate_and_describe(code, global_pool, rng_dev, k=k_dev, task_prompt=question)
                 paraphrase_candidates.append({
                     "prompt":        para,
                     "code":          code,

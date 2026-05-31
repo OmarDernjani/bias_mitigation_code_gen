@@ -50,7 +50,7 @@ def run_ape(
     for _ in range(n_proposals):
         enriched = optimizer_chain.invoke({"problem": question})
         code     = extract_code(target_chain.invoke({"user_prompt": enriched}))
-        score    = evaluate_code_bias(code, global_pool, rng_dev, k=k_dev)
+        score    = evaluate_code_bias(code, global_pool, rng_dev, k=k_dev, task_prompt=question)
         candidates.append({"prompt": enriched, "code": code, "dev_score": score})
     iterations.append({
         "round":      0,
@@ -77,7 +77,7 @@ def run_ape(
                     "previous": parent["prompt"],
                 })
                 code  = extract_code(target_chain.invoke({"user_prompt": variation}))
-                score = evaluate_code_bias(code, global_pool, rng_dev, k=k_dev)
+                score = evaluate_code_bias(code, global_pool, rng_dev, k=k_dev, task_prompt=question)
                 new_candidates.append({"prompt": variation, "code": code, "dev_score": score})
 
         # Elitism: top-k carry over.
