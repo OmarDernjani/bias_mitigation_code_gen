@@ -1,0 +1,30 @@
+services:
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=4,5        # solo GPU 4,5 per ollama
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - ollama_models:/root/.ollama       # i modelli persistono tra i run
+    ports:
+      - "11434:11434"                     # esposto anche sull'host se serve debug
+    restart: unless-stopped
+
+  app:
+    build: .
+    container_name: experiment
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_HOST=http://ollama:11434   # punta al container ollama
+    volumes:
+      - .:/workspace                      # mount live del codice
+      - .:/results                        # output esperimenti
+    working_dir: /workspace
+    command: python runner.py
+
+volumes:
+  ollama_models:

@@ -38,6 +38,7 @@ DATASET_PATH     = Path(os.getenv("CBS_DATASET", PKG_DIR / "dataset.json"))
 OUTPUT_DIR       = Path(os.getenv("CBS_OUTPUT_DIR", "result"))
 MAX_CONST_COMBOS = int(os.getenv("CBS_MAX_CONST_COMBINATIONS", 0)) or None
 SEED             = int(os.getenv("CBS_SEED", 42))
+base_url         = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 
 _FENCED_PATTERNS = (
@@ -75,7 +76,7 @@ def _build_static_chain(flag: str):
         ("system", system_prompt(flag)),
         ("human",  "{task}"),
     ])
-    llm = ChatOllama(model=MODEL_TARGET, num_ctx=NUM_CTX, num_keep=0)
+    llm = ChatOllama(model=MODEL_TARGET, num_ctx=NUM_CTX, num_keep=0, base_url=base_url)
     return template | llm | StrOutputParser()
 
 

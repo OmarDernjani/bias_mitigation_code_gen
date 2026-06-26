@@ -11,7 +11,7 @@ from prompts import CODE_FORMAT
 
 NUM_CTX      = int(os.environ.get("NUM_CTX", "8192"))
 EXEC_TIMEOUT = int(os.environ.get("EXEC_TIMEOUT", "10"))
-
+base_url     = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
 _FENCED = (
     re.compile(r"```python\s*\n?(.*?)```", re.DOTALL),
@@ -52,7 +52,7 @@ def build_target_chain(model: str):
         "No tests, no example calls, no commentary."
     )
     template = ChatPromptTemplate([("system", system_msg), ("human", "{user_prompt}")])
-    llm = ChatOllama(model=model, num_ctx=NUM_CTX, num_keep=0)
+    llm = ChatOllama(model=model, num_ctx=NUM_CTX, num_keep=0, base_url=base_url)
     return template | llm | StrOutputParser()
 
 
@@ -81,7 +81,7 @@ def build_optimizer_chain(model: str):
         "Return ONLY the final prompt for the target LLM. No preamble, no commentary."
     )
     template = ChatPromptTemplate([("system", system_msg), ("human", "Task:\n{problem}")])
-    llm = ChatOllama(model=model, num_ctx=NUM_CTX, num_keep=0)
+    llm = ChatOllama(model=model, num_ctx=NUM_CTX, num_keep=0, base_url=base_url)
     return template | llm | StrOutputParser()
 
 
@@ -105,5 +105,5 @@ def build_variation_chain(model: str):
         ("system", system_msg),
         ("human", "Task:\n{problem}\n\nPrevious enriched prompt:\n{previous}"),
     ])
-    llm = ChatOllama(model=model, num_ctx=NUM_CTX, num_keep=0)
+    llm = ChatOllama(model=model, num_ctx=NUM_CTX, num_keep=0, base_url=base_url)
     return template | llm | StrOutputParser()
